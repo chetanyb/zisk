@@ -2,6 +2,7 @@
 
 use fields::PrimeField64;
 use proofman_common::BufferPool;
+use proofman_util::{timer_start_debug, timer_stop_and_log_debug};
 
 use crate::error::{ExecutorError, ExecutorResult, RwLockExt};
 use crate::{state::ExecutionState, WitnessGenerator};
@@ -23,12 +24,10 @@ impl MainWitnessHandler {
         let main_instance =
             main_instances.get(&global_id).ok_or(ExecutorError::InstanceNotFound { global_id })?;
 
-        generator.compute_main_witness(
-            pctx,
-            state,
-            main_instance,
-            buffer_pool.take_buffer(),
-            stats_scope_id,
-        )
+        timer_start_debug!(WAIT_WITNESS_BUFFER, "WAIT_WITNESS_BUFFER_{}", global_id);
+        let trace_buffer = buffer_pool.take_buffer();
+        timer_stop_and_log_debug!(WAIT_WITNESS_BUFFER, "WAIT_WITNESS_BUFFER_{}", global_id);
+
+        generator.compute_main_witness(pctx, state, main_instance, trace_buffer, stats_scope_id)
     }
 }

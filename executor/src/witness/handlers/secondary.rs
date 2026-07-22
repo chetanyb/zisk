@@ -3,6 +3,7 @@
 
 use fields::PrimeField64;
 use proofman_common::{BufferPool, ProofCtx, SetupCtx};
+use proofman_util::{timer_start_debug, timer_stop_and_log_debug};
 
 use crate::error::{ExecutorError, ExecutorResult, RwLockExt};
 use crate::state::ExecutionState;
@@ -40,7 +41,9 @@ impl SecondaryWitnessHandler {
         }
 
         let collectors = state.take_collectors_for_instance(global_id, instance.instance_type())?;
+        timer_start_debug!(WAIT_WITNESS_BUFFER, "WAIT_WITNESS_BUFFER_{}", global_id);
         let trace_buffer = buffer_pool.take_buffer();
+        timer_stop_and_log_debug!(WAIT_WITNESS_BUFFER, "WAIT_WITNESS_BUFFER_{}", global_id);
 
         generator.compute_secn_witness(
             pctx,
