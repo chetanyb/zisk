@@ -25,6 +25,12 @@ struct Cli {
     #[arg(long)]
     compute_capacity: Option<u32>,
 
+    /// Exit with status 1 when post-failure recovery ends in a terminal wedge
+    /// (worker stuck in SettingUp), so the service supervisor can restart the
+    /// process instead of leaving a registered-but-dead worker
+    #[arg(long, default_value_t = false)]
+    exit_on_wedge: bool,
+
     /// Path to configuration file
     #[arg(
         long,
@@ -110,6 +116,7 @@ async fn main() -> Result<()> {
         cli.coordinator_url,
         cli.worker_id,
         cli.compute_capacity,
+        cli.exit_on_wedge,
     )
     .await?;
 

@@ -905,10 +905,14 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
     /// `executor::execute`'s Err arm — this task is only the post-cancel sync.
     /// On `RECOVERY_TIMEOUT` we log loudly and drop the completion: the worker
     /// stays wedged `SettingUp` (still heartbeating, so the stale-disconnected
-    /// sweep won't reap it), so operator action is required.
+    /// sweep won't reap it). With `worker.exit_on_wedge` set, any terminal
+    /// recovery outcome instead logs per-thread diagnostics and exits(1) so
+    /// the service supervisor replaces the process; otherwise operator action
+    /// is required.
     fn spawn_post_failure_recovery(&self, loop_tx: LoopEventSender) {
         let prover = self.worker.prover_arc();
         let worker_id = self.worker_config.worker.worker_id.as_string();
+        let exit_on_wedge = self.worker_config.worker.exit_on_wedge;
         tokio::spawn(async move {
             warn!("[Recovery] {worker_id}: running cluster cancellation handshake");
             let join = tokio::time::timeout(
@@ -924,18 +928,80 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
                         error!("[Recovery] {worker_id}: enqueue RecoveryComplete failed: {e}");
                     }
                 }
-                Ok(Ok(Err(e))) => error!(
-                    "[Recovery] {worker_id}: cluster handshake failed: {e:#}; worker stays in SettingUp"
-                ),
-                Ok(Err(e)) => {
-                    error!("[Recovery] {worker_id}: recovery task panicked: {e}")
+                Ok(Ok(Err(e))) => {
+                    error!(
+                        "[Recovery] {worker_id}: cluster handshake failed: {e:#}; worker stays in SettingUp"
+                    );
+                    Self::handle_terminal_wedge(&worker_id, exit_on_wedge);
                 }
-                Err(_) => error!(
-                    "[Recovery] {worker_id}: cluster handshake timed out after {:?}; worker is wedged in SettingUp and needs operator attention",
-                    Self::RECOVERY_TIMEOUT
-                ),
+                Ok(Err(e)) => {
+                    error!("[Recovery] {worker_id}: recovery task panicked: {e}");
+                    Self::handle_terminal_wedge(&worker_id, exit_on_wedge);
+                }
+                Err(_) => {
+                    error!(
+                        "[Recovery] {worker_id}: cluster handshake timed out after {:?}; worker is wedged in SettingUp and needs operator attention",
+                        Self::RECOVERY_TIMEOUT
+                    );
+                    Self::handle_terminal_wedge(&worker_id, exit_on_wedge);
+                }
             }
         });
+    }
+
+    /// Terminal-wedge escalation: a hung native compute thread cannot be
+    /// killed from inside the process, so the only real recovery is a process
+    /// restart. Capture per-thread diagnostics while the wedged state is
+    /// still alive, then exit(1) (when enabled) for the supervisor to
+    /// restart us.
+    fn handle_terminal_wedge(worker_id: &str, exit_on_wedge: bool) {
+        Self::log_thread_diagnostics(worker_id);
+        if exit_on_wedge {
+            error!(
+                "[Recovery] {worker_id}: exit_on_wedge set; exiting with status 1 so the service supervisor can replace this wedged process"
+            );
+            std::process::exit(1);
+        }
+    }
+
+    /// Best-effort per-thread diagnostics from `/proc` (Linux only; a no-op
+    /// warn elsewhere). `wchan` names the kernel function each thread is
+    /// blocked in (futex_wait, poll, ioctl, …), which identifies the blocked
+    /// primitive even where reading `task/<tid>/stack` needs privileges the
+    /// service user lacks.
+    fn log_thread_diagnostics(worker_id: &str) {
+        let tasks = match std::fs::read_dir("/proc/self/task") {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                warn!(
+                    "[Recovery] {worker_id}: thread diagnostics unavailable (/proc/self/task: {e})"
+                );
+                return;
+            }
+        };
+        for entry in tasks.flatten() {
+            let tid = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            let read_task_file = |file: &str| {
+                std::fs::read_to_string(path.join(file)).unwrap_or_default().trim().to_string()
+            };
+            let comm = read_task_file("comm");
+            let state = read_task_file("status")
+                .lines()
+                .find_map(|line| line.strip_prefix("State:").map(|s| s.trim().to_string()))
+                .unwrap_or_else(|| "?".to_string());
+            let wchan = read_task_file("wchan");
+            let stack = read_task_file("stack");
+            if stack.is_empty() {
+                error!(
+                    "[Recovery] {worker_id}: thread {tid} '{comm}' state='{state}' wchan={wchan}"
+                );
+            } else {
+                error!(
+                    "[Recovery] {worker_id}: thread {tid} '{comm}' state='{state}' wchan={wchan} kernel stack:\n{stack}"
+                );
+            }
+        }
     }
 
     /// Healthy reset is sub-second; this only fires when the prover is stuck.

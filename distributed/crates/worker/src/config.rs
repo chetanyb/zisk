@@ -34,6 +34,13 @@ pub struct WorkerConfig {
 
     /// This is the path where the worker will look for input files to process. By default, it is the current directory.
     pub inputs_folder: PathBuf,
+
+    /// Exit the process (status 1) when post-failure recovery ends in a
+    /// terminal wedge, so a service supervisor (e.g. systemd
+    /// `Restart=on-failure`) can replace the process. Without this the worker
+    /// stays registered but permanently unable to prove.
+    #[serde(default)]
+    pub exit_on_wedge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +89,7 @@ impl WorkerServiceConfig {
         coordinator_url: Option<String>,
         worker_id: Option<String>,
         compute_capacity: Option<u32>,
+        exit_on_wedge: bool,
     ) -> Result<Self> {
         // Config file is now optional - if not provided, defaults will be used
         let config = config.or_else(|| std::env::var("ZISK_WORKER_CONFIG_PATH").ok());
@@ -94,6 +102,7 @@ impl WorkerServiceConfig {
             .set_default("worker.compute_capacity.compute_units", 10)?
             .set_default("worker.environment", "development")?
             .set_default("worker.inputs_folder", ".")?
+            .set_default("worker.exit_on_wedge", false)?
             .set_default("coordinator.url", zisk_coordinator::Config::default_url())?
             .set_default("connection.reconnect_interval_seconds", 5)?
             .set_default("connection.heartbeat_timeout_seconds", 30)?
@@ -115,6 +124,12 @@ impl WorkerServiceConfig {
         if let Some(compute_capacity) = compute_capacity {
             builder =
                 builder.set_override("worker.compute_capacity.compute_units", compute_capacity)?;
+        }
+
+        // CLI flag can only enable; a config-file `worker.exit_on_wedge = true`
+        // is respected when the flag is absent.
+        if exit_on_wedge {
+            builder = builder.set_override("worker.exit_on_wedge", true)?;
         }
 
         let config = builder.build()?;
