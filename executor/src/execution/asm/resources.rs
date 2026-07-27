@@ -299,7 +299,8 @@ impl AsmResources {
     /// flag, and abort. Children stuck in `_wait_for_prec_avail` are NOT woken
     /// explicitly — they exit on the next `sem_timedwait` expiry (≤ 5 s, see
     /// `c_provided.c::_wait_for_prec_avail`) when they re-check the flag.
-    /// `RECOVERY_TIMEOUT` covers that slip.
+    /// The worker's recovery timeout (`worker.recovery_timeout_secs`)
+    /// covers that slip.
     pub fn signal_cancellation(&self) -> ExecutorResult<()> {
         self.shared.shmem_inputs.signal_reset().map_err(ExecutorError::asm_backend)
     }

@@ -41,6 +41,22 @@ pub struct WorkerConfig {
     /// stays registered but permanently unable to prove.
     #[serde(default)]
     pub exit_on_wedge: bool,
+
+    /// Seconds to wait for the post-failure recovery handshake before the
+    /// terminal-wedge path runs (diagnostics + optional `exit_on_wedge`
+    /// exit). A healthy reset is sub-second; this only fires when the
+    /// prover is stuck.
+    #[serde(default = "WorkerConfig::default_recovery_timeout_secs")]
+    pub recovery_timeout_secs: u64,
+}
+
+impl WorkerConfig {
+    const DEFAULT_RECOVERY_TIMEOUT_SECS: u64 = 300;
+
+    // Needed for serde's `default` attribute
+    pub const fn default_recovery_timeout_secs() -> u64 {
+        Self::DEFAULT_RECOVERY_TIMEOUT_SECS
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +106,7 @@ impl WorkerServiceConfig {
         worker_id: Option<String>,
         compute_capacity: Option<u32>,
         exit_on_wedge: bool,
+        recovery_timeout_secs: Option<u64>,
     ) -> Result<Self> {
         // Config file is now optional - if not provided, defaults will be used
         let config = config.or_else(|| std::env::var("ZISK_WORKER_CONFIG_PATH").ok());
@@ -103,6 +120,10 @@ impl WorkerServiceConfig {
             .set_default("worker.environment", "development")?
             .set_default("worker.inputs_folder", ".")?
             .set_default("worker.exit_on_wedge", false)?
+            .set_default(
+                "worker.recovery_timeout_secs",
+                WorkerConfig::DEFAULT_RECOVERY_TIMEOUT_SECS,
+            )?
             .set_default("coordinator.url", zisk_coordinator::Config::default_url())?
             .set_default("connection.reconnect_interval_seconds", 5)?
             .set_default("connection.heartbeat_timeout_seconds", 30)?
@@ -130,6 +151,11 @@ impl WorkerServiceConfig {
         // is respected when the flag is absent.
         if exit_on_wedge {
             builder = builder.set_override("worker.exit_on_wedge", true)?;
+        }
+
+        if let Some(recovery_timeout_secs) = recovery_timeout_secs {
+            builder =
+                builder.set_override("worker.recovery_timeout_secs", recovery_timeout_secs)?;
         }
 
         let config = builder.build()?;

@@ -31,6 +31,11 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     exit_on_wedge: bool,
 
+    /// Seconds to wait for the post-failure recovery handshake before
+    /// declaring the worker wedged (overrides config file, default 300)
+    #[arg(long)]
+    recovery_timeout_secs: Option<u64>,
+
     /// Path to configuration file
     #[arg(
         long,
@@ -117,6 +122,7 @@ async fn main() -> Result<()> {
         cli.worker_id,
         cli.compute_capacity,
         cli.exit_on_wedge,
+        cli.recovery_timeout_secs,
     )
     .await?;
 

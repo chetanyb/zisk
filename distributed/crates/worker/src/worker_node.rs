@@ -903,9 +903,10 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
     /// wait for the proofman thread to drain, cluster_barrier), then signal
     /// `WorkerRecoveryComplete`. The ASM soft reset itself runs inside
     /// `executor::execute`'s Err arm — this task is only the post-cancel sync.
-    /// On `RECOVERY_TIMEOUT` we log loudly and drop the completion: the worker
-    /// stays wedged `SettingUp` (still heartbeating, so the stale-disconnected
-    /// sweep won't reap it). With `worker.exit_on_wedge` set, any terminal
+    /// On recovery timeout (`worker.recovery_timeout_secs`, default 300) we
+    /// log loudly and drop the completion: the worker stays wedged
+    /// `SettingUp` (still heartbeating, so the stale-disconnected sweep
+    /// won't reap it). With `worker.exit_on_wedge` set, any terminal
     /// recovery outcome instead logs per-thread diagnostics and exits(1) so
     /// the service supervisor replaces the process; otherwise operator action
     /// is required.
@@ -913,10 +914,13 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
         let prover = self.worker.prover_arc();
         let worker_id = self.worker_config.worker.worker_id.as_string();
         let exit_on_wedge = self.worker_config.worker.exit_on_wedge;
+        // Healthy reset is sub-second; this timeout only fires when the
+        // prover is stuck.
+        let recovery_timeout = Duration::from_secs(self.worker_config.worker.recovery_timeout_secs);
         tokio::spawn(async move {
             warn!("[Recovery] {worker_id}: running cluster cancellation handshake");
             let join = tokio::time::timeout(
-                Self::RECOVERY_TIMEOUT,
+                recovery_timeout,
                 tokio::task::spawn_blocking(move || run_recovery(&*prover)),
             )
             .await;
@@ -941,7 +945,7 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
                 Err(_) => {
                     error!(
                         "[Recovery] {worker_id}: cluster handshake timed out after {:?}; worker is wedged in SettingUp and needs operator attention",
-                        Self::RECOVERY_TIMEOUT
+                        recovery_timeout
                     );
                     Self::handle_terminal_wedge(&worker_id, exit_on_wedge);
                 }
@@ -1003,9 +1007,6 @@ impl<T: ZiskBackend + 'static> WorkerNodeGrpc<T> {
             }
         }
     }
-
-    /// Healthy reset is sub-second; this only fires when the prover is stuck.
-    const RECOVERY_TIMEOUT: Duration = Duration::from_secs(300);
 
     async fn send_heartbeat_ack(
         &self,
