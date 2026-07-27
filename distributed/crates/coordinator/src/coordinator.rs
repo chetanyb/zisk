@@ -725,7 +725,10 @@ impl Coordinator {
             if cfg.default_compute_units == 0 { available } else { cfg.default_compute_units };
 
         let requested_units = requested.unwrap_or(default_requested);
-        let minimum_units = minimum.unwrap_or(cfg.min_compute_units);
+        // `min_compute_units` is a hard floor: a client-supplied minimum may
+        // raise it but never lower it, otherwise a degraded cluster silently
+        // proves at reduced capacity for any client that sends its own minimum.
+        let minimum_units = minimum.unwrap_or(0).max(cfg.min_compute_units);
 
         // Clamp to available — not an error to ask for more than is free right now.
         let resolved = requested_units.min(available);
@@ -1925,7 +1928,7 @@ mod tests {
 
     /// Workers stuck in `pending_recovery` past the configured threshold get
     /// unregistered by the monitor sweep — without this cap, a worker whose
-    /// `WorkerRecoveryComplete` is lost (e.g. its own RECOVERY_TIMEOUT fired)
+    /// `WorkerRecoveryComplete` is lost (e.g. its own recovery timeout fired)
     /// would stay `SettingUp` forever.
     #[tokio::test]
     async fn test_cleanup_stuck_recovery_unregisters_workers() {
@@ -3316,5 +3319,97 @@ mod tests {
             .unwrap();
 
         assert_eq!(coordinator.workers_pool.worker_state(&w0_id).await, Some(WorkerState::Ready));
+    }
+
+    /// Helper: coordinator with `n_workers` Ready workers of `units_each` CU.
+    async fn coordinator_with_ready_workers(
+        n_workers: usize,
+        units_each: u32,
+        config_overrides: impl FnOnce(&mut Config),
+    ) -> Coordinator {
+        let coordinator = Coordinator::new(test_config_with(config_overrides));
+        for i in 0..n_workers {
+            let (sender, _msgs) = MockMessageSender::new();
+            coordinator
+                .workers_pool
+                .register_worker(
+                    WorkerId::from(format!("w{}", i)),
+                    units_each,
+                    Box::new(sender),
+                    WorkerState::Ready,
+                )
+                .await
+                .unwrap();
+        }
+        coordinator
+    }
+
+    fn capacity_request(
+        compute_capacity: Option<u32>,
+        minimal_compute_capacity: Option<u32>,
+    ) -> LaunchProofRequestDto {
+        LaunchProofRequestDto {
+            data_id: Default::default(),
+            hash_id: String::new(),
+            compute_capacity,
+            minimal_compute_capacity,
+            inputs_mode: InputsModeDto::InputsNone,
+            hints_mode: HintsModeDto::HintsNone,
+            simulated_node: None,
+            metadata: BTreeMap::new(),
+            execution_only: false,
+            proof_type: ProofKind::VadcopFinal,
+        }
+    }
+
+    /// `min_compute_units` is a hard floor: a client-supplied minimum below
+    /// it must NOT admit a job on a degraded pool.
+    #[tokio::test]
+    async fn test_resolve_capacity_client_minimum_cannot_lower_config_floor() {
+        let coordinator = coordinator_with_ready_workers(3, 30, |c| {
+            c.coordinator.min_compute_units = 120;
+        })
+        .await;
+
+        let err = coordinator
+            .resolve_capacity(&capacity_request(None, Some(90)))
+            .await
+            .expect_err("job below the config floor must be refused");
+        assert!(
+            matches!(err, CoordinatorError::InsufficientCapacity),
+            "expected InsufficientCapacity, got {err:?}"
+        );
+    }
+
+    /// A client-supplied minimum above the config floor is still honored.
+    #[tokio::test]
+    async fn test_resolve_capacity_client_minimum_can_raise_config_floor() {
+        let coordinator = coordinator_with_ready_workers(4, 30, |c| {
+            c.coordinator.min_compute_units = 60;
+        })
+        .await;
+
+        let (requested, minimum) = coordinator
+            .resolve_capacity(&capacity_request(None, Some(90)))
+            .await
+            .expect("minimum above the floor with enough capacity must be admitted");
+        assert_eq!(requested.compute_units, 120);
+        assert_eq!(minimum.compute_units, 90);
+    }
+
+    /// Without a client minimum the config floor applies as-is.
+    #[tokio::test]
+    async fn test_resolve_capacity_defaults_to_config_floor() {
+        let coordinator = coordinator_with_ready_workers(4, 30, |c| {
+            c.coordinator.min_compute_units = 120;
+        })
+        .await;
+
+        let (requested, minimum) = coordinator
+            .resolve_capacity(&capacity_request(None, None))
+            .await
+            .expect("full pool at the floor must be admitted");
+        assert_eq!(requested.compute_units, 120);
+        assert_eq!(minimum.compute_units, 120);
     }
 }
